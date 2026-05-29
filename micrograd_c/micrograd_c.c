@@ -18,6 +18,7 @@ typedef struct Value
     struct Value *_prev[2];
     char *_op;
     char *_label;
+    double _aux;
     void (*_backward)(struct Value *self);
 } Value;
 
@@ -119,11 +120,8 @@ void exp_backward(Value *self)
 void pow_backward(Value *self)
 {
     // d/dx (x^n) = n * x^(n-1)
-    // and d/dn (x^n) = x^n ln x
     if (self->_prev[0])
-        self->_prev[0]->grad += self->_prev[1]->data * pow(self->_prev[0]->data, self->_prev[1]->data - 1) * self->grad;
-    if (self->_prev[1])
-        self->_prev[1]->grad += self->data * log(self->_prev[0]->data) * self->grad;
+        self->_prev[0]->grad += self->_aux * pow(self->_prev[0]->data, self->_aux - 1) * self->grad;
 }
 
 // operations
@@ -148,7 +146,7 @@ Value *mul_values(Value *a, Value *b)
     return v;
 }
 
-Value *tanh_value(Value *a)
+Value *tanh_values(Value *a)
 {
     Value *prev[2] = {a, NULL};
     Value *v = new_value(tanh(a->data));
@@ -169,10 +167,11 @@ Value *exp_value(Value *a)
 }
 
 // a ^ b
-Value *pow_value(Value *a, Value *b)
+Value *pow_value(Value *a, double exp)
 {
-    Value *prev[2] = {a, b};
-    Value *v = new_value(pow(a->data, b->data));
+    Value *prev[2] = {a, NULL};
+    Value *v = new_value(pow(a->data, exp));
+    v->_aux = exp;
     set_op(v, "pow");
     set_prev(v, prev);
     set_backward(v, pow_backward);
