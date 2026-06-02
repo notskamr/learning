@@ -11,6 +11,8 @@ typedef struct Value
     char *_label;
     double _aux;
     void (*_backward)(struct Value *self);
+    int pinned; // if it should be freed or not
+    int visited;
 } Value;
 
 Value *new_value(double data);
@@ -81,4 +83,7 @@ typedef struct
 MLP *new_mlp(Layer **layers, uint64_t nlayers);
 MLP *new_rand_mlp(uint64_t nin, uint64_t nouts[], uint64_t nlayers);
 Value **compute_outputs_mlp(MLP *m, Value **inputs, activation_fn fn);
-MLP *free_mlp(MLP *m);
+
+Value *mse_loss(Value **ypreds, Value **ys, uint64_t len);
+Value **zero_grad(Value **params, uint64_t nparams);
+Value **collect_parameters(MLP *m, uint64_t *nparams);

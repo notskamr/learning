@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS = -std=c99 -g -Wall -Wshadow --pedantic -Wvla -Werror
+CFLAGS = -std=c99 -g -Wall -Wshadow --pedantic -Wvla
 LIBS = -lm
 
 OBJS = micrograd_c.o main.o

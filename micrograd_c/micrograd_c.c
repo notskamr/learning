@@ -1,10 +1,12 @@
 // my attempt at a simple autograd implementation
 // in C to follow along with the micrograd series
 
-// v1: my attempt based on getting about an hour into the video
+// * v1: my attempt based on getting about an hour into the video
 
-// v2: fixing the bug discussed where we overwrite gradients of children
+// * v2: fixing the bug discussed where we overwrite gradients of children
 // when both children (fields in prev) are pointers to the same Value
+
+// * notes: this code is full of memory leaks; it is just a learning exercise
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,8 +32,17 @@ Value *new_value(double data)
     v->_op = NULL;
     v->_prev[0] = NULL;
     v->_prev[1] = NULL;
+    v->pinned = 0;
+    v->visited = 0;
     return v;
 }
+
+typedef struct
+{
+    Value **data;
+    uint64_t len;
+    uint64_t capacity;
+} ValueList;
 
 Value **new_values(double *data, uint64_t len)
 {
@@ -43,13 +54,56 @@ Value **new_values(double *data, uint64_t len)
     return vals;
 }
 
+ValueList *new_value_list(uint64_t capacity)
+{
+    ValueList *list = (ValueList *)malloc(sizeof(ValueList));
+    list->data = (Value **)malloc(sizeof(Value *) * capacity);
+    list->len = 0;
+    list->capacity = capacity;
+    return list;
+}
+
+ValueList *append_value(ValueList *list, Value *v)
+{
+    if (list->len >= list->capacity)
+    {
+        list->capacity *= 2;
+        Value **new_data = (Value **)realloc(list->data, sizeof(Value *) * list->capacity);
+        if (new_data == NULL)
+        {
+            fprintf(stderr, "Failed to realloc memory for ValueList\n");
+            exit(1);
+        }
+        list->data = new_data;
+    }
+    list->data[list->len++] = v;
+    return list;
+}
+
+void collect_nodes_r(Value *v, ValueList *list)
+{
+    if (v == NULL || v->visited)
+        return;
+    v->visited = 1;
+    collect_nodes_r(v->_prev[0], list);
+    collect_nodes_r(v->_prev[1], list);
+    append_value(list, v);
+}
+
 void free_value(Value *v)
 {
-    if (v == NULL)
-        return;
-    free_value(v->_prev[0]);
-    free_value(v->_prev[1]);
-    free(v);
+    ValueList *nodes = new_value_list(2000);
+    collect_nodes_r(v, nodes);
+    for (uint64_t i = 0; i < nodes->len; i++)
+    {
+        Value *n = nodes->data[i];
+        if (n->pinned)
+            n->visited = 0; // keep it, reset for next traversal
+        else
+            free(n); // freed exactly once, no visited read after free
+    }
+    free(nodes->data);
+    free(nodes);
 }
 
 void set_data(Value *v, double data)
@@ -205,53 +259,49 @@ Value *pow_value(Value *a, double exp)
 }
 
 // topological sorter - recursive
-void build_topo(Value *v, Value **topo, unsigned int *t_len, Value **visited, unsigned int *v_len)
+void build_topo_r(Value *v, ValueList *topo)
 {
     if (v == NULL)
         return;
 
     // set of visited nodes - only consider if not visited
-    for (int i = 0; i < *v_len; i++)
-        if (visited[i] == v)
-            return;
+    if (v->visited)
+        return;
 
-    // add unvisited node to arr
-    visited[(*v_len)++] = v;
+    // mark node as visted
+    v->visited = 1;
 
     // recurse through children, build all children (all dependencies)
     // before adding current node to topo chart -> dependencies always
     // placed before, hence we can backpropogate
     for (int i = 0; i < 2; i++)
     {
-        build_topo(v->_prev[i], topo, t_len, visited, v_len);
+        build_topo_r(v->_prev[i], topo);
     }
 
     // add current node to topo at right spot
-    topo[(*t_len)++] = v;
+    append_value(topo, v);
 }
 
 // go backwards in topological order chaining
 void backward(Value *out)
 {
     // get an array to store topological order
-    Value *topo[2000];
-
-    // visited store
-    Value *visited[2000];
-
-    unsigned int t_len = 0;
-    unsigned int v_len = 0;
+    ValueList *topo = new_value_list(2000);
 
     // seed output gradient - always 1: df/df = 1
     out->grad = 1.0;
 
-    build_topo(out, topo, &t_len, visited, &v_len);
+    build_topo_r(out, topo);
 
     // iterate backwards through the topological order
-    for (unsigned int i = t_len; i-- > 0;)
+    for (unsigned int i = topo->len; i-- > 0;)
     {
-        topo[i]->_backward(topo[i]);
+        topo->data[i]->_backward(topo->data[i]);
+        topo->data[i]->visited = 0; // reset visited for future backward calls
     }
+    free(topo->data);
+    free(topo);
 }
 
 void print_value(Value *v)
@@ -295,6 +345,27 @@ void free_neuron(Neuron *n)
     free(n->weights);
     free_value(n->bias);
     free(n);
+}
+
+void set_weights(Neuron *n, Value **weights)
+{
+    if (n == NULL)
+        return;
+    n->weights = weights;
+}
+
+void set_bias(Neuron *n, Value *bias)
+{
+    if (n == NULL)
+        return;
+    n->bias = bias;
+}
+
+void set_nin(Neuron *n, uint64_t nin)
+{
+    if (n == NULL)
+        return;
+    n->nin = nin;
 }
 
 Value *compute_activation(Neuron *n, Value **inputs, activation_fn fn)
@@ -377,4 +448,59 @@ Value **compute_outputs_mlp(MLP *m, Value **inputs, activation_fn fn)
     }
     m->out = inputs;
     return inputs;
+}
+
+// LOSS definitions
+
+Value *mse_loss(Value **ypreds, Value **ys, uint64_t len)
+{
+    Value *loss = new_value(0.0);
+    for (uint64_t i = 0; i < len; i++)
+    {
+        Value *diff = add_values(ypreds[i], mul_values(new_value(-1.0), ys[i]));
+        loss = add_values(loss, pow_value(diff, 2.0));
+    }
+    return loss;
+}
+
+Value **zero_grad(Value **params, uint64_t nparams)
+{
+    for (uint64_t i = 0; i < nparams; i++)
+    {
+        params[i]->grad = 0.0;
+    }
+    return params;
+}
+
+Value **collect_parameters(MLP *m, uint64_t *nparams)
+{
+    // collect all parameters (weights and biases) from the MLP into a single array
+    uint64_t total_params = 0;
+    for (uint64_t i = 0; i < m->nlayers; i++)
+    {
+        Layer *l = m->layers[i];
+        total_params += l->nout * l->neurons[0]->nin; // weights
+        total_params += l->nout;                      // one for each bias
+    }
+
+    Value **params = malloc(sizeof(Value *) * total_params);
+    uint64_t idx = 0;
+    for (uint64_t i = 0; i < m->nlayers; i++)
+    {
+        Layer *l = m->layers[i];
+        for (uint64_t j = 0; j < l->nout; j++)
+        {
+            Neuron *n = l->neurons[j];
+            for (uint64_t k = 0; k < n->nin; k++)
+            {
+                params[idx++] = n->weights[k];
+                params[idx - 1]->pinned = 1;
+            }
+            params[idx++] = n->bias;
+            params[idx - 1]->pinned = 1;
+        }
+    }
+
+    *nparams = total_params;
+    return params;
 }
